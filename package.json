@@ -1,0 +1,27 @@
+{
+  "name": "webxr-cubagem-picking",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sistema de Auxílio à Cubagem e Picking via WebXR e Three.js",
+  "scripts": {
+    "dev": "vite --host",
+    "dev:tunnel": "VITE_NO_SSL=1 vite --host --port 5173",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "three": "^0.174.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.174.0",
+    "@types/webxr": "^0.5.21",
+    "@vitejs/plugin-basic-ssl": "^2.0.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.8"
+  }
+}

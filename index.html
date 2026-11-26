@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Cubagem &amp; Picking — WebXR</title>
+  </head>
+  <body>
+    <div id="canvas-root" aria-label="Cena 3D WebXR"></div>
+
+    <!-- Raiz do DOM Overlay da sessão WebXR (immersive-ar) -->
+    <div id="xr-overlay" class="hud">
+      <div class="hud__top">
+        <header class="hud__header">
+          <div class="hud__brand">
+            <span class="hud__badge">WebXR · Three.js</span>
+            <h1 class="hud__title">Cubagem &amp; Picking</h1>
+          </div>
+          <div class="hud__header-right">
+            <span id="xr-status-pill" class="status-pill" data-state="checking">
+              Verificando
+            </span>
+            <button
+              id="btn-rules"
+              class="icon-btn"
+              type="button"
+              title="Regras de volume e empilhamento"
+              aria-expanded="false"
+            >
+              ?
+            </button>
+          </div>
+        </header>
+
+        <section class="hud__mode-bar" aria-label="Seleção de módulo">
+          <button
+            id="btn-mode-pallet"
+            class="mode-btn is-active"
+            type="button"
+            data-mode="pallet"
+          >
+            01 · Cubagem (Palete)
+          </button>
+          <button id="btn-mode-truck" class="mode-btn" type="button" data-mode="truck-bed">
+            02 · Picking (Caçamba)
+          </button>
+        </section>
+
+        <section class="metrics-bar" aria-label="Métricas de cubagem">
+          <div class="metrics-bar__main">
+            <span class="metrics-bar__label">Ocupação</span>
+            <strong id="metrics-percent" class="metrics-bar__percent">0.0%</strong>
+            <div class="progress-track" aria-hidden="true">
+              <div id="metrics-progress" class="progress-fill" style="width: 0%"></div>
+            </div>
+            <span id="metrics-volume" class="metrics-bar__volume">0 / 0 L</span>
+          </div>
+          <div class="metrics-bar__counts">
+            <span class="count-chip" title="Vermelhas (V > X)"><i class="dot dot--red"></i><b id="count-red">0</b></span>
+            <span class="count-chip" title="Verdes (Y < V ≤ X)"><i class="dot dot--green"></i><b id="count-green">0</b></span>
+            <span class="count-chip" title="Azuis (V ≤ Y)"><i class="dot dot--blue"></i><b id="count-blue">0</b></span>
+          </div>
+        </section>
+      </div>
+
+      <!-- Mira central exibida durante sessão AR após ancorar o container -->
+      <div id="ar-crosshair" class="crosshair is-hidden" aria-hidden="true">
+        <span class="crosshair__ring"></span>
+        <span class="crosshair__dot"></span>
+      </div>
+
+      <!-- Painel minimalista de regras -->
+      <aside id="rules-modal" class="rules-modal is-hidden" aria-label="Regras de empilhamento">
+        <div class="rules-modal__header">
+          <strong>Regras de Volume &amp; Empilhamento</strong>
+          <button id="btn-close-rules" class="icon-btn" type="button" aria-label="Fechar">
+            ✕
+          </button>
+        </div>
+        <ul class="rules-list">
+          <li>
+            <i class="dot dot--red"></i>
+            <span><b>Vermelha</b> (V &gt; 42 L) — apenas na Base ou sobre Vermelha.</span>
+          </li>
+          <li>
+            <i class="dot dot--green"></i>
+            <span><b>Verde</b> (20 L &lt; V &le; 42 L) — Base, Vermelha ou Verde.</span>
+          </li>
+          <li>
+            <i class="dot dot--blue"></i>
+            <span><b>Azul</b> (V &le; 20 L) — qualquer cor ou Base.</span>
+          </li>
+        </ul>
+        <p class="rules-modal__tip">
+          <b>Desktop:</b> mova o mouse para mirar, clique para empilhar, arraste para girar.
+          Atalhos: <code>R</code> 90°, <code>Z</code> desfazer, <code>N</code> nova caixa.
+          <br />
+          <b>Celular (WebXR):</b> toque em <b>Iniciar AR</b>, aponte para o chão/mesa e toque para
+          ancorar; depois mire e toque para empilhar.
+        </p>
+      </aside>
+
+      <div class="hud__bottom">
+        <section id="alert-banner" class="alert-banner is-hidden" role="status" aria-live="polite">
+          <strong id="alert-title">Status</strong>
+          <span id="alert-message"></span>
+        </section>
+
+        <footer class="hud__footer">
+          <div class="box-card" aria-label="Próxima caixa sorteada">
+            <div class="box-card__header">
+              <span id="next-box-dot" class="color-dot"></span>
+              <span id="next-box-label">Próxima caixa</span>
+            </div>
+            <div id="next-box-dims" class="box-card__dims">—</div>
+            <div id="next-box-hint" class="box-card__hint">—</div>
+          </div>
+
+          <div class="hud__controls">
+            <button id="btn-rotate" class="tool-btn" type="button" title="Girar caixa 90° (R)">
+              ↻ 90°
+            </button>
+            <button id="btn-next-box" class="tool-btn" type="button" title="Sortear nova caixa (N)">
+              Nova
+            </button>
+            <button id="btn-undo" class="tool-btn" type="button" title="Desfazer última caixa (Z)">
+              Desfazer
+            </button>
+            <button id="btn-clear" class="tool-btn" type="button" title="Limpar todas as caixas">
+              Limpar
+            </button>
+            <button
+              id="btn-seed-truck"
+              class="tool-btn tool-btn--highlight is-hidden"
+              type="button"
+              title="Popular caçamba com carga inicial aleatória"
+            >
+              Simular Carga
+            </button>
+            <button
+              id="btn-reanchor"
+              class="tool-btn is-hidden"
+              type="button"
+              title="Reposicionar container na superfície AR"
+            >
+              Reposicionar
+            </button>
+            <button id="btn-toggle-xr" class="action-btn action-btn--primary" type="button" disabled>
+              Iniciar AR
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

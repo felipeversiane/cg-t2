@@ -1,0 +1,580 @@
+import * as THREE from 'three';
+import { createBoxSpec, generateRandomBox } from '../../domain/box-generator';
+import { DEFAULT_TRUCK_BED_BOUNDS, DEFAULT_VOLUME_THRESHOLDS } from '../../domain/config';
+import {
+  calculateCubingMetrics,
+  computeRestingCenterY,
+  createTruckZones,
+  describeDetailedValidation,
+  evaluateTruckZones,
+  findZoneAt,
+  validatePlacement,
+} from '../../domain/stacking-rules';
+import type {
+  BoxCategory,
+  BoxSpec,
+  ContainerBounds,
+  CubingMetrics,
+  PlacedBox,
+  PlacementValidation,
+  TruckZone,
+} from '../../domain/types';
+import {
+  createBoxMesh,
+  disposeObject3D,
+  setBoxConflictHighlight,
+  updateGhostAppearance,
+} from '../../scene/box-mesh';
+import { createZoneLabelTexture } from '../../scene/label-sprite';
+import type { HoverInspection, InteractiveContainerModule } from '../types';
+
+interface ZoneVisual {
+  readonly zone: TruckZone;
+  readonly fillMaterial: THREE.MeshBasicMaterial;
+  readonly borderMaterial: THREE.LineBasicMaterial;
+}
+
+/**
+ * Módulo B — Picking Guiado e Caçamba de Caminhão.
+ * Simula uma caçamba 3D com 6 marcadores/zonas espaciais (Z1..Z6).
+ * Ao detectar uma zona ou posição específica sob a mira, destaca de forma inequívoca
+ * quando NÃO for possível empilhar a caixa (ghost vermelho pulsante, badge ✕ BLOQUEADO,
+ * destaque da caixa/teto/parede causadora do conflito e sugestão das zonas válidas).
+ */
+export class TruckBedModule implements InteractiveContainerModule {
+  public readonly root: THREE.Group;
+  public readonly bounds: ContainerBounds;
+  public readonly zones: readonly TruckZone[];
+
+  private readonly boxesGroup: THREE.Group;
+  private readonly boxMeshes = new Map<string, THREE.Group>();
+  private readonly zoneVisuals = new Map<string, ZoneVisual>();
+  private readonly raycastFloor: THREE.Mesh;
+
+  private readonly wallMaterials: THREE.MeshStandardMaterial[] = [];
+  private readonly ceilingAlertMesh: THREE.Mesh;
+
+  private placedBoxes: PlacedBox[] = [];
+  private anchored = false;
+
+  private ghostMesh: THREE.Group | null = null;
+  private ghostBoxId: string | null = null;
+  private ghostSignature = '';
+
+  private currentCandidate: PlacedBox | null = null;
+  private currentValidation: PlacementValidation | null = null;
+
+  constructor(bounds: ContainerBounds = DEFAULT_TRUCK_BED_BOUNDS) {
+    this.bounds = bounds;
+    this.zones = createTruckZones(bounds, 2, 3);
+
+    this.root = new THREE.Group();
+    this.root.name = 'truck-bed-module';
+
+    this.boxesGroup = new THREE.Group();
+    this.boxesGroup.name = 'truck-bed-boxes';
+
+    // Plano invisível com pequena margem externa para detectar colisões contra as paredes
+    const floorGeom = new THREE.PlaneGeometry(bounds.width + 0.5, bounds.depth + 0.5);
+    floorGeom.rotateX(-Math.PI / 2);
+    this.raycastFloor = new THREE.Mesh(
+      floorGeom,
+      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }),
+    );
+    this.raycastFloor.name = 'truck-raycast-floor';
+
+    const ceilingGeom = new THREE.PlaneGeometry(bounds.width, bounds.depth);
+    ceilingGeom.rotateX(Math.PI / 2);
+    this.ceilingAlertMesh = new THREE.Mesh(
+      ceilingGeom,
+      new THREE.MeshBasicMaterial({
+        color: 0xff1e42,
+        transparent: true,
+        opacity: 0.34,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    this.ceilingAlertMesh.position.y = bounds.height;
+    this.ceilingAlertMesh.visible = false;
+
+    this.root.add(
+      this.buildTruckBedStructure(),
+      this.buildZoneMarkers(),
+      this.raycastFloor,
+      this.ceilingAlertMesh,
+      this.boxesGroup,
+    );
+  }
+
+  public get isAnchored(): boolean {
+    return this.anchored;
+  }
+
+  public get boxes(): readonly PlacedBox[] {
+    return this.placedBoxes;
+  }
+
+  public anchorAtMatrix(matrix: THREE.Matrix4): void {
+    matrix.decompose(this.root.position, this.root.quaternion, this.root.scale);
+    this.anchored = true;
+    this.root.visible = true;
+    this.root.updateMatrixWorld(true);
+  }
+
+  public resetAnchor(): void {
+    this.anchored = false;
+    this.clearHover();
+  }
+
+  /**
+   * Pré-carrega a caçamba com caixas randômicas (Vermelha, Verde e Azul) distribuídas nas zonas
+   * para facilitar a demonstração imediata de cenários válidos e bloqueios de empilhamento.
+   */
+  public seedDemoCargo(): void {
+    this.clearBoxes();
+
+    const sampleByCategory = (target: BoxCategory): BoxSpec => {
+      for (let attempt = 0; attempt < 120; attempt++) {
+        const box = generateRandomBox();
+        if (box.category === target) {
+          return box;
+        }
+      }
+      // Fallback procedural determinístico dentro da categoria caso RNG extremo ocorra
+      if (target === 'red') {
+        return createBoxSpec({ width: 0.38, height: 0.34, depth: 0.38 }, DEFAULT_VOLUME_THRESHOLDS);
+      }
+      if (target === 'green') {
+        return createBoxSpec({ width: 0.3, height: 0.3, depth: 0.32 }, DEFAULT_VOLUME_THRESHOLDS);
+      }
+      return createBoxSpec({ width: 0.22, height: 0.22, depth: 0.22 }, DEFAULT_VOLUME_THRESHOLDS);
+    };
+
+    // Z1: Vermelha (base forte) | Z2: Azul (bloqueia Verde/Vermelha em cima!)
+    // Z3: Verde (bloqueia Vermelha em cima, aceita Verde/Azul) | Z4: pilha alta (testa teto!)
+    const seedPlan: ReadonlyArray<{ zoneIndex: number; category: BoxCategory }> = [
+      { zoneIndex: 0, category: 'red' },
+      { zoneIndex: 1, category: 'blue' },
+      { zoneIndex: 2, category: 'green' },
+      { zoneIndex: 3, category: 'red' },
+      { zoneIndex: 3, category: 'green' },
+    ];
+
+    for (const item of seedPlan) {
+      const zone = this.zones[item.zoneIndex];
+      if (!zone) continue;
+
+      const spec = sampleByCategory(item.category);
+      const centerY = computeRestingCenterY(
+        zone.centerX,
+        zone.centerZ,
+        spec.dimensions.width,
+        spec.dimensions.height,
+        spec.dimensions.depth,
+        this.placedBoxes,
+      );
+
+      const candidate: PlacedBox = {
+        ...spec,
+        position: { x: zone.centerX, y: centerY, z: zone.centerZ },
+      };
+
+      const validation = validatePlacement(candidate, this.placedBoxes, this.bounds);
+      if (validation.valid) {
+        this.commitPlacedBox(candidate);
+      }
+    }
+  }
+
+  public updateHover(
+    raycaster: THREE.Raycaster,
+    nextBox: BoxSpec,
+    timeSec: number,
+  ): HoverInspection {
+    if (!this.root.visible) {
+      this.clearHover();
+      return { active: false, candidate: null, validation: null };
+    }
+
+    this.root.updateMatrixWorld(true);
+
+    const targets: THREE.Object3D[] = [...this.boxesGroup.children, this.raycastFloor];
+    const hits = raycaster.intersectObjects(targets, true);
+    const firstHit = hits[0];
+
+    if (!firstHit) {
+      this.clearHover();
+      return { active: false, candidate: null, validation: null };
+    }
+
+    const localPoint = this.root.worldToLocal(firstHit.point.clone());
+    const detectedZone = findZoneAt(this.zones, localPoint.x, localPoint.z);
+
+    // Se detectou uma zona/marcador (Z1..Z6), centraliza a inspeção exatamente no marcador da zona
+    const targetX = detectedZone ? detectedZone.centerX : localPoint.x;
+    const targetZ = detectedZone ? detectedZone.centerZ : localPoint.z;
+
+    const centerY = computeRestingCenterY(
+      targetX,
+      targetZ,
+      nextBox.dimensions.width,
+      nextBox.dimensions.height,
+      nextBox.dimensions.depth,
+      this.placedBoxes,
+    );
+
+    const candidate: PlacedBox = {
+      ...nextBox,
+      position: { x: targetX, y: centerY, z: targetZ },
+    };
+
+    const validation = validatePlacement(candidate, this.placedBoxes, this.bounds);
+    this.currentCandidate = candidate;
+    this.currentValidation = validation;
+
+    this.ensureGhostMesh(nextBox);
+    if (this.ghostMesh) {
+      this.ghostMesh.visible = true;
+      this.ghostMesh.position.set(candidate.position.x, candidate.position.y, candidate.position.z);
+      updateGhostAppearance(this.ghostMesh, !validation.valid, timeSec);
+    }
+
+    // Avalia todas as zonas para destacar alternativas válidas quando a zona alvo estiver bloqueada
+    const zoneEvaluations = evaluateTruckZones(nextBox, this.placedBoxes, this.bounds, this.zones);
+    const validAlternativeZones = zoneEvaluations
+      .filter((ev) => ev.validation.valid && ev.zone.id !== detectedZone?.id)
+      .map((ev) => ev.zone);
+
+    this.applyVisualFeedback(
+      validation,
+      detectedZone,
+      new Set(validAlternativeZones.map((z) => z.id)),
+      timeSec,
+    );
+
+    const baseReason = describeDetailedValidation(
+      candidate,
+      validation,
+      this.placedBoxes,
+      this.bounds,
+    );
+
+    const suggestedZoneLabels = validAlternativeZones.map((z) => z.label);
+    let diagnosticMessage = baseReason;
+    if (!validation.valid) {
+      const suggestionText =
+        suggestedZoneLabels.length > 0
+          ? ` Zonas válidas: ${suggestedZoneLabels.join(', ')}.`
+          : ' Nenhuma zona da caçamba comporta esta caixa agora.';
+      diagnosticMessage = `${baseReason}${suggestionText}`;
+    } else if (detectedZone) {
+      diagnosticMessage = `Zona ${detectedZone.label} liberada para empilhamento.`;
+    }
+
+    return {
+      active: true,
+      candidate,
+      validation,
+      zoneLabel: detectedZone?.label,
+      suggestedZoneLabels,
+      diagnosticMessage,
+    };
+  }
+
+  public clearHover(): void {
+    this.currentCandidate = null;
+    this.currentValidation = null;
+    if (this.ghostMesh) {
+      this.ghostMesh.visible = false;
+    }
+
+    this.ceilingAlertMesh.visible = false;
+    for (const wallMat of this.wallMaterials) {
+      wallMat.color.setHex(0x64748b);
+      wallMat.emissive.setHex(0x000000);
+      wallMat.opacity = 0.2;
+    }
+
+    for (const mesh of this.boxMeshes.values()) {
+      setBoxConflictHighlight(mesh, false, 0);
+    }
+
+    for (const visual of this.zoneVisuals.values()) {
+      visual.fillMaterial.color.setHex(0xffffff);
+      visual.fillMaterial.opacity = 0.05;
+      visual.borderMaterial.color.setHex(0x71717a);
+    }
+  }
+
+  public tryPlaceCurrentHover(): PlacementValidation | null {
+    if (!this.currentCandidate || !this.currentValidation) {
+      return null;
+    }
+
+    if (!this.currentValidation.valid) {
+      return this.currentValidation;
+    }
+
+    this.commitPlacedBox(this.currentCandidate);
+    const result = this.currentValidation;
+    this.clearHover();
+    return result;
+  }
+
+  public undoLastBox(): PlacedBox | null {
+    const removed = this.placedBoxes.pop() ?? null;
+    if (!removed) {
+      return null;
+    }
+
+    const mesh = this.boxMeshes.get(removed.id);
+    if (mesh) {
+      this.boxesGroup.remove(mesh);
+      disposeObject3D(mesh);
+      this.boxMeshes.delete(removed.id);
+    }
+
+    this.clearHover();
+    return removed;
+  }
+
+  public clearBoxes(): void {
+    for (const mesh of this.boxMeshes.values()) {
+      this.boxesGroup.remove(mesh);
+      disposeObject3D(mesh);
+    }
+    this.boxMeshes.clear();
+    this.placedBoxes = [];
+    this.clearHover();
+  }
+
+  public getMetrics(): CubingMetrics {
+    return calculateCubingMetrics(this.placedBoxes, this.bounds);
+  }
+
+  private commitPlacedBox(placed: PlacedBox): void {
+    this.placedBoxes.push(placed);
+    const mesh = createBoxMesh(placed);
+    mesh.position.set(placed.position.x, placed.position.y, placed.position.z);
+    this.boxesGroup.add(mesh);
+    this.boxMeshes.set(placed.id, mesh);
+  }
+
+  private ensureGhostMesh(spec: BoxSpec): void {
+    const signature = `${spec.id}:${spec.dimensions.width}x${spec.dimensions.height}x${spec.dimensions.depth}`;
+    if (this.ghostMesh && this.ghostBoxId === spec.id && this.ghostSignature === signature) {
+      return;
+    }
+
+    if (this.ghostMesh) {
+      this.root.remove(this.ghostMesh);
+      disposeObject3D(this.ghostMesh);
+    }
+
+    this.ghostMesh = createBoxMesh(spec, { ghost: true });
+    this.ghostBoxId = spec.id;
+    this.ghostSignature = signature;
+    this.root.add(this.ghostMesh);
+  }
+
+  private applyVisualFeedback(
+    validation: PlacementValidation,
+    activeZone: TruckZone | null,
+    validAlternativeIds: ReadonlySet<string>,
+    timeSec: number,
+  ): void {
+    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 8);
+
+    // 1. Destaca caixas conflitantes (cor inválida ou colisão)
+    const conflictSet = new Set(validation.conflictingBoxIds);
+    for (const [boxId, mesh] of this.boxMeshes) {
+      setBoxConflictHighlight(mesh, conflictSet.has(boxId), timeSec);
+    }
+
+    // 2. Destaca teto se estourar altura máxima da caçamba
+    const heightExceeded = validation.reasons.includes('EXCEEDS_MAX_HEIGHT');
+    this.ceilingAlertMesh.visible = heightExceeded;
+    if (heightExceeded) {
+      const mat = this.ceilingAlertMesh.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.22 + pulse * 0.35;
+    }
+
+    // 3. Destaca paredes se estourar limites laterais
+    const outOfBounds =
+      validation.reasons.includes('OUT_OF_BOUNDS_X') ||
+      validation.reasons.includes('OUT_OF_BOUNDS_Z');
+    for (const wallMat of this.wallMaterials) {
+      if (outOfBounds) {
+        wallMat.color.setHex(0xff1e42);
+        wallMat.emissive.setHex(0xdc2626);
+        wallMat.emissiveIntensity = 0.35 + pulse * 0.5;
+        wallMat.opacity = 0.35 + pulse * 0.2;
+      } else {
+        wallMat.color.setHex(0x64748b);
+        wallMat.emissive.setHex(0x000000);
+        wallMat.emissiveIntensity = 0;
+        wallMat.opacity = 0.2;
+      }
+    }
+
+    // 4. Atualiza destaque das zonas/marcadores Z1..Z6
+    for (const [zoneId, visual] of this.zoneVisuals) {
+      if (activeZone && zoneId === activeZone.id) {
+        if (validation.valid) {
+          visual.fillMaterial.color.setHex(0x22c55e);
+          visual.fillMaterial.opacity = 0.34;
+          visual.borderMaterial.color.setHex(0x86efac);
+        } else {
+          visual.fillMaterial.color.setHex(0xff1e42);
+          visual.fillMaterial.opacity = 0.3 + pulse * 0.35;
+          visual.borderMaterial.color.setHex(0xfef08a);
+        }
+      } else if (!validation.valid && validAlternativeIds.has(zoneId)) {
+        // Quando a posição atual está bloqueada, ilumina zonas válidas alternativas (picking guiado!)
+        visual.fillMaterial.color.setHex(0x10b981);
+        visual.fillMaterial.opacity = 0.16 + pulse * 0.22;
+        visual.borderMaterial.color.setHex(0x34d399);
+      } else {
+        visual.fillMaterial.color.setHex(0xffffff);
+        visual.fillMaterial.opacity = 0.05;
+        visual.borderMaterial.color.setHex(0x52525b);
+      }
+    }
+  }
+
+  private buildZoneMarkers(): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'truck-zone-markers';
+
+    for (const zone of this.zones) {
+      const margin = 0.03;
+      const w = zone.width - margin;
+      const d = zone.depth - margin;
+
+      const fillGeom = new THREE.PlaneGeometry(w, d);
+      fillGeom.rotateX(-Math.PI / 2);
+      const fillMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.05,
+        depthWrite: false,
+      });
+      const fillMesh = new THREE.Mesh(fillGeom, fillMaterial);
+      fillMesh.position.set(zone.centerX, 0.003, zone.centerZ);
+
+      const borderGeom = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, 0.002, d));
+      const borderMaterial = new THREE.LineBasicMaterial({ color: 0x71717a });
+      const borderMesh = new THREE.LineSegments(borderGeom, borderMaterial);
+      borderMesh.position.set(zone.centerX, 0.004, zone.centerZ);
+
+      // Etiqueta de marcador Z1..Z6 sobre o piso da zona
+      const labelSize = Math.min(w, d) * 0.42;
+      const labelGeom = new THREE.PlaneGeometry(labelSize, labelSize);
+      labelGeom.rotateX(-Math.PI / 2);
+      const labelMat = new THREE.MeshBasicMaterial({
+        map: createZoneLabelTexture(zone.label),
+        transparent: true,
+        depthWrite: false,
+      });
+      const labelMesh = new THREE.Mesh(labelGeom, labelMat);
+      labelMesh.position.set(zone.centerX, 0.006, zone.centerZ);
+
+      group.add(fillMesh, borderMesh, labelMesh);
+      this.zoneVisuals.set(zone.id, { zone, fillMaterial, borderMaterial });
+    }
+
+    return group;
+  }
+
+  private buildTruckBedStructure(): THREE.Group {
+    const bed = new THREE.Group();
+    bed.name = 'truck-bed-structure';
+
+    const floorThickness = 0.05;
+    const floor = new THREE.Mesh(
+      new THREE.BoxGeometry(this.bounds.width + 0.06, floorThickness, this.bounds.depth + 0.06),
+      new THREE.MeshStandardMaterial({
+        color: 0x18181b,
+        roughness: 0.72,
+        metalness: 0.25,
+      }),
+    );
+    floor.position.y = -floorThickness / 2;
+    bed.add(floor);
+
+    // Para-choque traseiro minimalista em grafite claro
+    const bumper = new THREE.Mesh(
+      new THREE.BoxGeometry(this.bounds.width + 0.08, 0.055, 0.04),
+      new THREE.MeshStandardMaterial({
+        color: 0xe4e4e7,
+        roughness: 0.45,
+        metalness: 0.2,
+      }),
+    );
+    bumper.position.set(0, -floorThickness / 2, this.bounds.depth / 2 + 0.045);
+    bed.add(bumper);
+
+    // Paredes laterais e frontal semitransparentes (traseira aberta para acesso do operador)
+    const wallThickness = 0.025;
+    const makeWallMat = (): THREE.MeshStandardMaterial => {
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x71717a,
+        roughness: 0.45,
+        metalness: 0.2,
+        transparent: true,
+        opacity: 0.16,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      this.wallMaterials.push(mat);
+      return mat;
+    };
+
+    const leftWall = new THREE.Mesh(
+      new THREE.BoxGeometry(wallThickness, this.bounds.height, this.bounds.depth),
+      makeWallMat(),
+    );
+    leftWall.position.set(
+      -this.bounds.width / 2 - wallThickness / 2,
+      this.bounds.height / 2,
+      0,
+    );
+
+    const rightWall = new THREE.Mesh(
+      new THREE.BoxGeometry(wallThickness, this.bounds.height, this.bounds.depth),
+      makeWallMat(),
+    );
+    rightWall.position.set(
+      this.bounds.width / 2 + wallThickness / 2,
+      this.bounds.height / 2,
+      0,
+    );
+
+    const frontWall = new THREE.Mesh(
+      new THREE.BoxGeometry(this.bounds.width, this.bounds.height, wallThickness),
+      makeWallMat(),
+    );
+    frontWall.position.set(
+      0,
+      this.bounds.height / 2,
+      -this.bounds.depth / 2 - wallThickness / 2,
+    );
+
+    // Gabarito estrutural da caçamba (arestas em branco/prata minimalista)
+    const frame = new THREE.LineSegments(
+      new THREE.EdgesGeometry(
+        new THREE.BoxGeometry(this.bounds.width, this.bounds.height, this.bounds.depth),
+      ),
+      new THREE.LineBasicMaterial({
+        color: 0xe4e4e7,
+        transparent: true,
+        opacity: 0.55,
+      }),
+    );
+    frame.position.y = this.bounds.height / 2;
+
+    bed.add(leftWall, rightWall, frontWall, frame);
+    return bed;
+  }
+}
