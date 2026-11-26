@@ -87,6 +87,40 @@ export function generateRandomBox(options: GenerateBoxOptions = {}): BoxSpec {
   return createBoxSpec(dimensions, thresholds, options.id);
 }
 
+/**
+ * Gera aleatoriamente uma nova caixa (dimensões w, h, d randômicas) garantindo
+ * que a cor/tipo resultante (definida pelo volume) seja diferente da atual,
+ * sem permitir que o usuário escolha manualmente qual cor virá.
+ */
+export function generateRandomBoxWithDifferentCategory(
+  currentCategory: BoxCategory,
+  options: GenerateBoxOptions = {},
+): BoxSpec {
+  const rng = options.rng ?? Math.random;
+  const otherCategories = (['red', 'green', 'blue'] as const).filter(
+    (category) => category !== currentCategory,
+  );
+  const targetCategory =
+    otherCategories[Math.floor(Math.min(0.999999, Math.max(0, rng())) * otherCategories.length)] ??
+    otherCategories[0]!;
+
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const candidate = generateRandomBox(options);
+    if (candidate.category === targetCategory) {
+      return candidate;
+    }
+  }
+
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const candidate = generateRandomBox(options);
+    if (candidate.category !== currentCategory) {
+      return candidate;
+    }
+  }
+
+  return generateRandomBox(options);
+}
+
 /** Rotaciona a caixa em 90° no plano horizontal (troca largura <-> profundidade). */
 export function rotateBox90(box: BoxSpec): BoxSpec {
   return {

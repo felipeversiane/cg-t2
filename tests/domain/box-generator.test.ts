@@ -4,6 +4,7 @@ import {
   classifyBoxByVolume,
   createBoxSpec,
   generateRandomBox,
+  generateRandomBoxWithDifferentCategory,
   rotateBox90,
 } from '../../src/domain/box-generator';
 import { DEFAULT_DIMENSION_RANGE, DEFAULT_VOLUME_THRESHOLDS } from '../../src/domain/config';
@@ -54,5 +55,15 @@ describe('box-generator', () => {
     expect(rotated.dimensions).toEqual({ width: 0.2, height: 0.25, depth: 0.4 });
     expect(rotated.volume).toBe(box.volume);
     expect(rotated.category).toBe(box.category);
+  });
+
+  it('gera aleatoriamente uma caixa de cor/tipo diferente da atual preservando regra de volume', () => {
+    for (const current of ['red', 'green', 'blue'] as const) {
+      for (let i = 0; i < 15; i++) {
+        const next = generateRandomBoxWithDifferentCategory(current);
+        expect(next.category).not.toBe(current);
+        expect(classifyBoxByVolume(next.volume, DEFAULT_VOLUME_THRESHOLDS)).toBe(next.category);
+      }
+    }
   });
 });

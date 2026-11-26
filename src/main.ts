@@ -1,5 +1,9 @@
 import * as THREE from 'three';
-import { generateRandomBox, rotateBox90 } from './domain/box-generator';
+import {
+  generateRandomBox,
+  generateRandomBoxWithDifferentCategory,
+  rotateBox90,
+} from './domain/box-generator';
 import type { AppMode, BoxSpec } from './domain/types';
 import { PalletModule } from './modules/cubing/pallet-module';
 import { TruckBedModule } from './modules/picking/truck-bed-module';
@@ -162,7 +166,7 @@ async function bootstrap(): Promise<void> {
     },
 
     onNextBox: () => {
-      nextBox = generateRandomBox();
+      nextBox = generateRandomBoxWithDifferentCategory(nextBox.category);
       syncNextBox();
     },
 
@@ -338,7 +342,7 @@ async function bootstrap(): Promise<void> {
       nextBox = rotateBox90(nextBox);
       syncNextBox();
     } else if (key === 'n') {
-      nextBox = generateRandomBox();
+      nextBox = generateRandomBoxWithDifferentCategory(nextBox.category);
       syncNextBox();
     } else if (key === 'z') {
       getActiveModule().undoLastBox();
