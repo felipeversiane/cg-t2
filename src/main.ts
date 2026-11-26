@@ -4,14 +4,12 @@ import type { AppMode, BoxSpec } from './domain/types';
 import { PalletModule } from './modules/cubing/pallet-module';
 import { TruckBedModule } from './modules/picking/truck-bed-module';
 import type { HoverInspection, InteractiveContainerModule } from './modules/types';
-import { animateReticle, createReticle } from './scene/reticle';
+import { animateReticle, createReticle, setReticleFootprint } from './scene/reticle';
 import { SceneManager } from './scene/scene-manager';
 import { HudController } from './ui/hud';
-import { HitTestController } from './xr/hit-test';
+import { HitTestController, setRaycasterFromXRViewer } from './xr/hit-test';
 import { isImmersiveARSupported, XRSessionManager } from './xr/xr-session';
 import './styles/main.css';
-
-const CENTER_NDC = new THREE.Vector2(0, 0);
 
 async function bootstrap(): Promise<void> {
   const canvasRoot = document.getElementById('canvas-root');
@@ -30,7 +28,6 @@ async function bootstrap(): Promise<void> {
   const palletModule = new PalletModule();
   const truckBedModule = new TruckBedModule();
   truckBedModule.root.visible = false;
-  // Pré-carrega a caçamba com carga demonstrativa randômica para validar bloqueios de imediato
   truckBedModule.seedDemoCargo();
 
   sceneManager.scene.add(palletModule.root, truckBedModule.root);
@@ -39,18 +36,24 @@ async function bootstrap(): Promise<void> {
   let nextBox: BoxSpec = generateRandomBox();
   let lastHover: HoverInspection = { active: false, candidate: null, validation: null };
   let transientAlertUntil = 0;
+  let lastFrameTimeMs = 0;
 
-  // Estado do ponteiro no Modo Simulador Desktop
   const pointerNdc = new THREE.Vector2(0, 0);
   let pointerInsideCanvas = false;
   let pointerDownX = 0;
   let pointerDownY = 0;
 
   const raycaster = new THREE.Raycaster();
+  raycaster.params.Line.threshold = 0.01;
   const hitTestController = new HitTestController();
 
   const getActiveModule = (): InteractiveContainerModule =>
     activeMode === 'pallet' ? palletModule : truckBedModule;
+
+  const syncReticleFootprint = (): void => {
+    const bounds = getActiveModule().bounds;
+    setReticleFootprint(reticle, bounds.width, bounds.depth);
+  };
 
   const syncMetrics = (): void => {
     hud.setMetrics(getActiveModule().getMetrics());
@@ -102,18 +105,17 @@ async function bootstrap(): Promise<void> {
         activeMode === 'truck-bed' && lastHover.zoneLabel
           ? `Caixa empilhada na zona ${lastHover.zoneLabel}`
           : 'Caixa empilhada com sucesso';
-      showTransientAlert('Alocação Confirmada', label, 'success', 1500);
+      showTransientAlert('Alocação Confirmada', label, 'success', 1400);
       return;
     }
 
-    // Feedback imediato de bloqueio (inclui vibração no celular)
     navigator.vibrate?.([60, 40, 60]);
     const zonePrefix = lastHover.zoneLabel ? `[${lastHover.zoneLabel}] ` : '';
     showTransientAlert(
       `${zonePrefix}Empilhamento Bloqueado`,
       lastHover.diagnosticMessage ?? 'Não é possível empilhar esta caixa nesta posição.',
       'error',
-      3000,
+      2800,
     );
   };
 
@@ -123,6 +125,7 @@ async function bootstrap(): Promise<void> {
       getActiveModule().clearHover();
       activeMode = mode;
       hud.setActiveMode(mode);
+      syncReticleFootprint();
 
       if (xrSessionManager.isActive) {
         const mod = getActiveModule();
@@ -140,12 +143,12 @@ async function bootstrap(): Promise<void> {
         palletModule.root.visible = mode === 'pallet';
         truckBedModule.root.visible = mode === 'truck-bed';
         showTransientAlert(
-          mode === 'pallet' ? 'Módulo A · Cubagem em Palete' : 'Módulo B · Picking em Caçamba',
+          mode === 'pallet' ? 'Módulo 01 · Cubagem em Palete' : 'Módulo 02 · Picking em Caçamba',
           mode === 'pallet'
-            ? 'Passe o mouse sobre o palete e clique para empilhar as caixas aleatórias.'
-            : 'Passe o mouse nas zonas Z1–Z6 da caçamba para testar bloqueios de empilhamento.',
+            ? 'Mova o mouse sobre o palete e clique para empilhar.'
+            : 'Mova o mouse nas zonas Z1–Z6 da caçamba para testar bloqueios de empilhamento.',
           'info',
-          3200,
+          3000,
         );
       }
 
@@ -155,7 +158,7 @@ async function bootstrap(): Promise<void> {
     onRotateBox: () => {
       nextBox = rotateBox90(nextBox);
       syncNextBox();
-      showTransientAlert('Caixa Rotacionada 90°', 'Largura e profundidade invertidas.', 'info', 1200);
+      showTransientAlert('Caixa Rotacionada 90°', 'Largura e profundidade invertidas.', 'info', 1100);
     },
 
     onNextBox: () => {
@@ -167,14 +170,14 @@ async function bootstrap(): Promise<void> {
       const removed = getActiveModule().undoLastBox();
       syncMetrics();
       if (removed) {
-        showTransientAlert('Última Caixa Removida', 'Ação desfeita com sucesso.', 'info', 1400);
+        showTransientAlert('Última Caixa Removida', 'Ação desfeita com sucesso.', 'info', 1300);
       }
     },
 
     onClear: () => {
       getActiveModule().clearBoxes();
       syncMetrics();
-      showTransientAlert('Container Limpo', 'Todas as caixas foram removidas.', 'info', 1500);
+      showTransientAlert('Container Limpo', 'Todas as caixas foram removidas.', 'info', 1400);
     },
 
     onSeedTruck: () => {
@@ -182,9 +185,9 @@ async function bootstrap(): Promise<void> {
       syncMetrics();
       showTransientAlert(
         'Carga Simulada na Caçamba',
-        'Caixas aleatórias posicionadas em Z1–Z4. Mire sobre elas para testar bloqueios de cor e altura!',
+        'Caixas aleatórias posicionadas em Z1–Z4. Aponte sobre elas para testar bloqueios!',
         'info',
-        3200,
+        3000,
       );
     },
 
@@ -194,6 +197,7 @@ async function bootstrap(): Promise<void> {
       mod.resetAnchor();
       mod.root.visible = false;
       hud.setCrosshairState(false);
+      syncReticleFootprint();
       showTransientAlert(
         'Reposicionar Container',
         'Aponte para o chão ou mesa até o retículo aparecer e toque na tela.',
@@ -217,6 +221,7 @@ async function bootstrap(): Promise<void> {
       truckBedModule.resetAnchor();
       palletModule.root.visible = false;
       truckBedModule.root.visible = false;
+      syncReticleFootprint();
 
       hud.setCrosshairState(false);
       showTransientAlert(
@@ -263,7 +268,6 @@ async function bootstrap(): Promise<void> {
 
     const activeModule = getActiveModule();
 
-    // Etapa 1: Ancorar palete ou caçamba na superfície real detectada pelo Hit Testing
     if (!activeModule.isAnchored) {
       if (!reticle.visible) {
         showTransientAlert(
@@ -279,18 +283,17 @@ async function bootstrap(): Promise<void> {
       reticle.visible = false;
       showTransientAlert(
         activeMode === 'pallet' ? 'Palete Ancorado!' : 'Caçamba Ancorada!',
-        'Mire no container com o centro da tela e toque para empilhar as caixas.',
+        'Aponte o celular para mover a caixa e toque na tela para empilhar.',
         'success',
-        2800,
+        2600,
       );
       return;
     }
 
-    // Etapa 2: Tentar empilhar a caixa na posição atual da mira
     attemptPlacement();
   });
 
-  // Interação do Modo Simulador Desktop (mouse hover + clique simples sem arrastar)
+  // Interação do Modo Simulador Desktop
   const domElement = sceneManager.renderer.domElement;
 
   const updatePointerNdc = (event: PointerEvent): void => {
@@ -328,7 +331,6 @@ async function bootstrap(): Promise<void> {
     }
   });
 
-  // Atalhos de teclado úteis para demonstração no notebook
   window.addEventListener('keydown', (event) => {
     if (event.repeat) return;
     const key = event.key.toLowerCase();
@@ -348,8 +350,8 @@ async function bootstrap(): Promise<void> {
     }
   });
 
-  // Inicialização
   setDesktopLayout();
+  syncReticleFootprint();
   hud.setActiveMode(activeMode);
   syncNextBox();
   syncMetrics();
@@ -360,27 +362,29 @@ async function bootstrap(): Promise<void> {
   if (!arSupported && !window.isSecureContext) {
     showTransientAlert(
       'WebXR Requer HTTPS',
-      'Abra via ngrok (https://...) ou localhost via USB para habilitar a câmera AR no celular.',
+      'Abra via GitHub Pages (https://...) ou ngrok para habilitar a câmera AR no celular.',
       'error',
       8000,
     );
   } else if (!arSupported) {
     showTransientAlert(
       'Modo Simulador 3D Ativo',
-      'Mova o mouse sobre o palete/caçamba e clique para empilhar. Arraste para girar a câmera.',
+      'Mova o mouse sobre o palete/caçamba e clique para empilhar. Arraste para girar.',
       'info',
-      5000,
+      4500,
     );
   }
 
   sceneManager.startLoop((timeMs, frame) => {
+    const dt = lastFrameTimeMs > 0 ? Math.min(0.05, (timeMs - lastFrameTimeMs) / 1000) : 0.016;
+    lastFrameTimeMs = timeMs;
     const timeSec = timeMs * 0.001;
     const activeModule = getActiveModule();
 
     // 1. Fluxo WebXR Real (`immersive-ar` + `hit-test`)
     if (frame) {
       if (!activeModule.isAnchored) {
-        const hitFound = hitTestController.update(frame, sceneManager.renderer, reticle);
+        const hitFound = hitTestController.update(frame, sceneManager.renderer, reticle, dt);
         if (hitFound) {
           animateReticle(reticle, timeSec);
         }
@@ -389,8 +393,14 @@ async function bootstrap(): Promise<void> {
       }
 
       reticle.visible = false;
-      raycaster.setFromCamera(CENTER_NDC, sceneManager.getActiveCamera());
-      lastHover = activeModule.updateHover(raycaster, nextBox, timeSec);
+      const hasAim = setRaycasterFromXRViewer(frame, sceneManager.renderer, raycaster);
+      if (!hasAim) {
+        activeModule.clearHover();
+        hud.setCrosshairState(true, 'idle');
+        return;
+      }
+
+      lastHover = activeModule.updateHover(raycaster, nextBox, timeSec, dt);
 
       const crosshairStatus = !lastHover.active
         ? 'idle'
@@ -405,7 +415,7 @@ async function bootstrap(): Promise<void> {
     // 2. Fluxo Simulador 3D Desktop
     if (pointerInsideCanvas && activeModule.isAnchored) {
       raycaster.setFromCamera(pointerNdc, sceneManager.camera);
-      lastHover = activeModule.updateHover(raycaster, nextBox, timeSec);
+      lastHover = activeModule.updateHover(raycaster, nextBox, timeSec, dt);
       updateLiveHoverAlert(lastHover);
     }
   });

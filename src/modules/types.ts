@@ -27,7 +27,12 @@ export interface InteractiveContainerModule {
 
   anchorAtMatrix(matrix: THREE.Matrix4): void;
   resetAnchor(): void;
-  updateHover(raycaster: THREE.Raycaster, nextBox: BoxSpec, timeSec: number): HoverInspection;
+  updateHover(
+    raycaster: THREE.Raycaster,
+    nextBox: BoxSpec,
+    timeSec: number,
+    dt: number,
+  ): HoverInspection;
   clearHover(): void;
   tryPlaceCurrentHover(): PlacementValidation | null;
   undoLastBox(): PlacedBox | null;
