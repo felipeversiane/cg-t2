@@ -133,6 +133,48 @@ export function setBoxConflictHighlight(
   }
 }
 
+export type BoxSelectionVisualState = 'none' | 'top-idle' | 'top-hovered' | 'blocked-hovered';
+
+/** Destaca caixas durante o modo de seleção "Mover Topo". */
+export function setBoxSelectionVisual(
+  boxGroup: THREE.Group,
+  state: BoxSelectionVisualState,
+  pulsePhase: number,
+): void {
+  const data = boxGroup.userData as Partial<BoxMeshUserData>;
+  if (!data.bodyMaterial || !data.edgeMaterial) {
+    return;
+  }
+
+  if (state === 'none') {
+    data.bodyMaterial.emissive.setHex(0x000000);
+    data.bodyMaterial.emissiveIntensity = 0;
+    data.edgeMaterial.color.setHex(0x0f172a);
+    return;
+  }
+
+  const pulse = 0.5 + 0.5 * Math.sin(pulsePhase * 8);
+
+  if (state === 'top-idle') {
+    data.bodyMaterial.emissive.setHex(0xffffff);
+    data.bodyMaterial.emissiveIntensity = 0.1 + pulse * 0.08;
+    data.edgeMaterial.color.setHex(0xffffff);
+    return;
+  }
+
+  if (state === 'top-hovered') {
+    data.bodyMaterial.emissive.setHex(0xffffff);
+    data.bodyMaterial.emissiveIntensity = 0.32 + pulse * 0.28;
+    data.edgeMaterial.color.setHex(0x86efac);
+    return;
+  }
+
+  // blocked-hovered: existe outra caixa apoiada em cima dela
+  data.bodyMaterial.emissive.setHex(0xff1e42);
+  data.bodyMaterial.emissiveIntensity = 0.45 + pulse * 0.45;
+  data.edgeMaterial.color.setHex(0xfef08a);
+}
+
 /** Libera geometrias e materiais ao descartar uma caixa 3D. */
 export function disposeObject3D(object: THREE.Object3D): void {
   object.traverse((child) => {

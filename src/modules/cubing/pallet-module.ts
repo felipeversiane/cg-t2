@@ -4,6 +4,8 @@ import {
   calculateCubingMetrics,
   computeRestingCenterY,
   describeDetailedValidation,
+  getTopBoxIds,
+  isTopBox,
   validatePlacement,
 } from '../../domain/stacking-rules';
 import type {
@@ -17,10 +19,20 @@ import {
   createBoxMesh,
   disposeObject3D,
   setBoxConflictHighlight,
+  setBoxSelectionVisual,
   updateGhostAppearance,
 } from '../../scene/box-mesh';
-import { createLandingFootprint, resolveContainerAim, smoothAxis } from '../../scene/container-aim';
-import type { HoverInspection, InteractiveContainerModule } from '../types';
+import {
+  createLandingFootprint,
+  findAimedBoxId,
+  resolveContainerAim,
+  smoothAxis,
+} from '../../scene/container-aim';
+import type {
+  HoverInspection,
+  InteractiveContainerModule,
+  TopBoxSelectionInspection,
+} from '../types';
 
 const AIM_HOLD_GRACE_SEC = 0.25;
 
@@ -52,6 +64,7 @@ export class PalletModule implements InteractiveContainerModule {
 
   private currentCandidate: PlacedBox | null = null;
   private currentValidation: PlacementValidation | null = null;
+  private hoveredSelectableTopBoxId: string | null = null;
 
   constructor(bounds: ContainerBounds = DEFAULT_PALLET_BOUNDS) {
     this.bounds = bounds;
@@ -248,6 +261,84 @@ export class PalletModule implements InteractiveContainerModule {
     this.currentCandidate = null;
     this.currentValidation = null;
     return result;
+  }
+
+  public inspectTopBoxSelection(
+    raycaster: THREE.Raycaster,
+    timeSec: number,
+  ): TopBoxSelectionInspection {
+    this.clearHover();
+    this.root.updateMatrixWorld(true);
+
+    const topIds = new Set(getTopBoxIds(this.placedBoxes));
+    const aimedId = findAimedBoxId(raycaster, this.boxMeshes);
+    const hoveredBox = aimedId ? (this.placedBoxes.find((b) => b.id === aimedId) ?? null) : null;
+    const selectable = hoveredBox !== null && isTopBox(hoveredBox, this.placedBoxes);
+
+    this.hoveredSelectableTopBoxId = selectable && hoveredBox ? hoveredBox.id : null;
+
+    for (const [boxId, mesh] of this.boxMeshes) {
+      if (aimedId && boxId === aimedId) {
+        setBoxSelectionVisual(mesh, selectable ? 'top-hovered' : 'blocked-hovered', timeSec);
+      } else if (topIds.has(boxId)) {
+        setBoxSelectionVisual(mesh, 'top-idle', timeSec);
+      } else {
+        setBoxSelectionVisual(mesh, 'none', timeSec);
+      }
+    }
+
+    return { hoveredBox, selectable };
+  }
+
+  public pickHoveredTopBox(): PlacedBox | null {
+    if (!this.hoveredSelectableTopBoxId) {
+      return null;
+    }
+
+    const index = this.placedBoxes.findIndex((b) => b.id === this.hoveredSelectableTopBoxId);
+    if (index < 0) {
+      this.hoveredSelectableTopBoxId = null;
+      return null;
+    }
+
+    const [picked] = this.placedBoxes.splice(index, 1);
+    if (!picked) {
+      return null;
+    }
+
+    const mesh = this.boxMeshes.get(picked.id);
+    if (mesh) {
+      this.boxesGroup.remove(mesh);
+      disposeObject3D(mesh);
+      this.boxMeshes.delete(picked.id);
+    }
+
+    this.clearSelectionVisuals();
+    // Inicia suavização a partir da posição original da caixa selecionada
+    this.hasSmoothedAim = true;
+    this.smoothedX = picked.position.x;
+    this.smoothedY = picked.position.y;
+    this.smoothedZ = picked.position.z;
+    return picked;
+  }
+
+  public restoreBox(box: PlacedBox): void {
+    if (this.boxMeshes.has(box.id)) {
+      return;
+    }
+    this.placedBoxes.push(box);
+    const mesh = createBoxMesh(box);
+    mesh.position.set(box.position.x, box.position.y, box.position.z);
+    this.boxesGroup.add(mesh);
+    this.boxMeshes.set(box.id, mesh);
+    this.clearHover();
+  }
+
+  public clearSelectionVisuals(): void {
+    this.hoveredSelectableTopBoxId = null;
+    for (const mesh of this.boxMeshes.values()) {
+      setBoxSelectionVisual(mesh, 'none', 0);
+    }
   }
 
   public undoLastBox(): PlacedBox | null {

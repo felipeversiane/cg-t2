@@ -5,12 +5,15 @@ export interface HudCallbacks {
   readonly onModeChange: (mode: AppMode) => void;
   readonly onRotateBox: () => void;
   readonly onNextBox: () => void;
+  readonly onToggleMoveTop: () => void;
   readonly onUndo: () => void;
   readonly onClear: () => void;
   readonly onSeedTruck: () => void;
   readonly onReanchor: () => void;
   readonly onToggleXR: () => void;
 }
+
+export type MoveTopUIState = 'idle' | 'selecting' | 'carrying';
 
 export type AlertVariant = 'info' | 'success' | 'error';
 
@@ -34,6 +37,7 @@ export class HudController {
   private readonly btnModeTruck: HTMLButtonElement;
   private readonly btnRotate: HTMLButtonElement;
   private readonly btnNextBox: HTMLButtonElement;
+  private readonly btnMoveTop: HTMLButtonElement;
   private readonly btnUndo: HTMLButtonElement;
   private readonly btnClear: HTMLButtonElement;
   private readonly btnSeedTruck: HTMLButtonElement;
@@ -67,6 +71,7 @@ export class HudController {
     this.btnModeTruck = getRequiredElement<HTMLButtonElement>('btn-mode-truck');
     this.btnRotate = getRequiredElement<HTMLButtonElement>('btn-rotate');
     this.btnNextBox = getRequiredElement<HTMLButtonElement>('btn-next-box');
+    this.btnMoveTop = getRequiredElement<HTMLButtonElement>('btn-move-top');
     this.btnUndo = getRequiredElement<HTMLButtonElement>('btn-undo');
     this.btnClear = getRequiredElement<HTMLButtonElement>('btn-clear');
     this.btnSeedTruck = getRequiredElement<HTMLButtonElement>('btn-seed-truck');
@@ -105,6 +110,7 @@ export class HudController {
     this.btnModeTruck.addEventListener('click', () => callbacks.onModeChange('truck-bed'));
     this.btnRotate.addEventListener('click', () => callbacks.onRotateBox());
     this.btnNextBox.addEventListener('click', () => callbacks.onNextBox());
+    this.btnMoveTop.addEventListener('click', () => callbacks.onToggleMoveTop());
     this.btnUndo.addEventListener('click', () => callbacks.onUndo());
     this.btnClear.addEventListener('click', () => callbacks.onClear());
     this.btnSeedTruck.addEventListener('click', () => callbacks.onSeedTruck());
@@ -167,7 +173,7 @@ export class HudController {
     this.btnSeedTruck.classList.toggle('is-hidden', mode !== 'truck-bed');
   }
 
-  public setNextBox(box: BoxSpec): void {
+  public setNextBox(box: BoxSpec, prefix?: string): void {
     const config = CATEGORY_CONFIG[box.category];
     const wCm = Math.round(box.dimensions.width * 100);
     const hCm = Math.round(box.dimensions.height * 100);
@@ -175,9 +181,25 @@ export class HudController {
     const liters = (box.volume * 1000).toFixed(1);
 
     this.nextBoxDot.style.backgroundColor = box.colorCss;
-    this.nextBoxLabel.textContent = `${config.label} · ${liters} L`;
+    this.nextBoxLabel.textContent = prefix
+      ? `${prefix} ${config.label} · ${liters} L`
+      : `${config.label} · ${liters} L`;
     this.nextBoxDims.textContent = `${wCm} × ${hCm} × ${dCm} cm`;
     this.nextBoxHint.textContent = `Empilha em: ${config.allowedBaseHint}`;
+  }
+
+  public setMoveTopState(state: MoveTopUIState): void {
+    const isActive = state !== 'idle';
+    this.btnMoveTop.classList.toggle('tool-btn--active', isActive);
+    this.btnNextBox.disabled = isActive;
+
+    if (state === 'idle') {
+      this.btnMoveTop.textContent = 'Mover Topo';
+    } else if (state === 'selecting') {
+      this.btnMoveTop.textContent = 'Sair Mover';
+    } else {
+      this.btnMoveTop.textContent = 'Cancelar Mov.';
+    }
   }
 
   public setMetrics(metrics: CubingMetrics): void {

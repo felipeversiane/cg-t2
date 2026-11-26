@@ -96,10 +96,11 @@
         </ul>
         <p class="rules-modal__tip">
           <b>Desktop:</b> mova o mouse para mirar, clique para empilhar, arraste para girar.
-          Atalhos: <code>R</code> 90°, <code>Z</code> desfazer, <code>N</code> nova caixa.
+          Atalhos: <code>R</code> 90°, <code>M</code> mover topo, <code>Z</code> desfazer,
+          <code>N</code> mudar cor.
           <br />
           <b>Celular (WebXR):</b> toque em <b>Iniciar AR</b>, aponte para o chão/mesa e toque para
-          ancorar; depois mire e toque para empilhar.
+          ancorar; use <b>Mover Topo</b> para pegar e reposicionar caixas do topo.
         </p>
       </aside>
 
@@ -130,6 +131,14 @@
               title="Mudar aleatoriamente o tipo/cor da caixa (N)"
             >
               Mudar Cor
+            </button>
+            <button
+              id="btn-move-top"
+              class="tool-btn"
+              type="button"
+              title="Selecionar e mudar de lugar uma caixa do topo (M)"
+            >
+              Mover Topo
             </button>
             <button id="btn-undo" class="tool-btn" type="button" title="Desfazer última caixa (Z)">
               Desfazer

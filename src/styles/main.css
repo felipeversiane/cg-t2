@@ -543,6 +543,23 @@ body {
   font-weight: 600;
 }
 
+.tool-btn--active {
+  background: var(--white);
+  border-color: var(--white);
+  color: var(--black);
+  font-weight: 700;
+}
+
+.tool-btn--active:hover {
+  background: #e4e4e7;
+  border-color: #e4e4e7;
+}
+
+.tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .action-btn {
   margin-left: auto;
   padding: 9px 16px;

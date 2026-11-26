@@ -4,16 +4,23 @@ import {
   generateRandomBoxWithDifferentCategory,
   rotateBox90,
 } from './domain/box-generator';
-import type { AppMode, BoxSpec } from './domain/types';
+import { CATEGORY_CONFIG } from './domain/config';
+import type { AppMode, BoxSpec, PlacedBox } from './domain/types';
 import { PalletModule } from './modules/cubing/pallet-module';
 import { TruckBedModule } from './modules/picking/truck-bed-module';
-import type { HoverInspection, InteractiveContainerModule } from './modules/types';
+import type {
+  HoverInspection,
+  InteractiveContainerModule,
+  TopBoxSelectionInspection,
+} from './modules/types';
 import { animateReticle, createReticle, setReticleFootprint } from './scene/reticle';
 import { SceneManager } from './scene/scene-manager';
 import { HudController } from './ui/hud';
 import { HitTestController, setRaycasterFromXRViewer } from './xr/hit-test';
 import { isImmersiveARSupported, XRSessionManager } from './xr/xr-session';
 import './styles/main.css';
+
+type InteractionState = 'place' | 'move-select' | 'move-carrying';
 
 async function bootstrap(): Promise<void> {
   const canvasRoot = document.getElementById('canvas-root');
@@ -37,8 +44,15 @@ async function bootstrap(): Promise<void> {
   sceneManager.scene.add(palletModule.root, truckBedModule.root);
 
   let activeMode: AppMode = 'pallet';
+  let interactionState: InteractionState = 'place';
   let nextBox: BoxSpec = generateRandomBox();
+
+  // Estado de movimentação de caixa do topo
+  let movingOriginalBox: PlacedBox | null = null;
+  let movingWorkingBox: BoxSpec | null = null;
+
   let lastHover: HoverInspection = { active: false, candidate: null, validation: null };
+  let lastTopSelection: TopBoxSelectionInspection = { hoveredBox: null, selectable: false };
   let transientAlertUntil = 0;
   let lastFrameTimeMs = 0;
 
@@ -63,8 +77,22 @@ async function bootstrap(): Promise<void> {
     hud.setMetrics(getActiveModule().getMetrics());
   };
 
-  const syncNextBox = (): void => {
+  const syncBoxCard = (): void => {
+    if (interactionState === 'move-carrying' && movingWorkingBox) {
+      hud.setNextBox(movingWorkingBox, 'Movendo:');
+      return;
+    }
     hud.setNextBox(nextBox);
+  };
+
+  const syncMoveTopUI = (): void => {
+    if (interactionState === 'place') {
+      hud.setMoveTopState('idle');
+    } else if (interactionState === 'move-select') {
+      hud.setMoveTopState('selecting');
+    } else {
+      hud.setMoveTopState('carrying');
+    }
   };
 
   const showTransientAlert = (
@@ -75,6 +103,22 @@ async function bootstrap(): Promise<void> {
   ): void => {
     transientAlertUntil = performance.now() + durationMs;
     hud.showAlert(title, message, variant);
+  };
+
+  /** Restaura qualquer caixa sendo carregada e retorna ao modo normal (`place`). */
+  const cancelActiveMove = (restoreToPlace = true): void => {
+    const activeModule = getActiveModule();
+    if (movingOriginalBox) {
+      activeModule.restoreBox(movingOriginalBox);
+      movingOriginalBox = null;
+      movingWorkingBox = null;
+    }
+    activeModule.clearHover();
+    activeModule.clearSelectionVisuals();
+    interactionState = restoreToPlace ? 'place' : 'move-select';
+    syncMoveTopUI();
+    syncBoxCard();
+    syncMetrics();
   };
 
   const setDesktopLayout = (): void => {
@@ -93,8 +137,85 @@ async function bootstrap(): Promise<void> {
     truckBedModule.root.visible = activeMode === 'truck-bed';
   };
 
-  const attemptPlacement = (): void => {
+  const handlePrimaryAction = (): void => {
     const activeModule = getActiveModule();
+
+    // 1. Modo Mover Topo — Etapa de Seleção
+    if (interactionState === 'move-select') {
+      const picked = activeModule.pickHoveredTopBox();
+      if (picked) {
+        movingOriginalBox = picked;
+        movingWorkingBox = {
+          id: picked.id,
+          dimensions: picked.dimensions,
+          volume: picked.volume,
+          category: picked.category,
+          colorHex: picked.colorHex,
+          colorCss: picked.colorCss,
+        };
+        interactionState = 'move-carrying';
+        syncMoveTopUI();
+        syncBoxCard();
+        syncMetrics();
+        const label = CATEGORY_CONFIG[picked.category].shortLabel;
+        showTransientAlert(
+          `Caixa ${label} Selecionada`,
+          'Aponte para o novo local e toque/clique para posicionar (ou toque em Cancelar Mov.).',
+          'info',
+          2600,
+        );
+        return;
+      }
+
+      if (lastTopSelection.hoveredBox && !lastTopSelection.selectable) {
+        navigator.vibrate?.([60, 40, 60]);
+        showTransientAlert(
+          'Caixa Bloqueada',
+          'Só é possível selecionar caixas do topo. Mova primeiro a caixa que está em cima.',
+          'error',
+          2600,
+        );
+      }
+      return;
+    }
+
+    // 2. Modo Mover Topo — Etapa de Reposicionar a Caixa Selecionada
+    if (interactionState === 'move-carrying') {
+      const validation = activeModule.tryPlaceCurrentHover();
+      if (!validation) {
+        return;
+      }
+
+      if (validation.valid) {
+        movingOriginalBox = null;
+        movingWorkingBox = null;
+        interactionState = 'move-select';
+        syncMoveTopUI();
+        syncBoxCard();
+        syncMetrics();
+        const zoneText =
+          activeMode === 'truck-bed' && lastHover.zoneLabel ? ` para ${lastHover.zoneLabel}` : '';
+        showTransientAlert(
+          'Caixa Reposicionada',
+          `Caixa movida com sucesso${zoneText}. Selecione outra do topo ou toque em Sair Mover.`,
+          'success',
+          1900,
+        );
+        return;
+      }
+
+      navigator.vibrate?.([60, 40, 60]);
+      const zonePrefix = lastHover.zoneLabel ? `[${lastHover.zoneLabel}] ` : '';
+      showTransientAlert(
+        `${zonePrefix}Movimento Bloqueado`,
+        lastHover.diagnosticMessage ?? 'Não é possível mover a caixa para esta posição.',
+        'error',
+        2800,
+      );
+      return;
+    }
+
+    // 3. Modo Normal — Empilhar Nova Caixa Randômica
     const validation = activeModule.tryPlaceCurrentHover();
     if (!validation) {
       return;
@@ -102,7 +223,7 @@ async function bootstrap(): Promise<void> {
 
     if (validation.valid) {
       nextBox = generateRandomBox();
-      syncNextBox();
+      syncBoxCard();
       syncMetrics();
 
       const label =
@@ -123,10 +244,51 @@ async function bootstrap(): Promise<void> {
     );
   };
 
+  const toggleMoveTopMode = (): void => {
+    const activeModule = getActiveModule();
+
+    if (interactionState === 'move-carrying') {
+      cancelActiveMove(false);
+      showTransientAlert(
+        'Movimento Cancelado',
+        'A caixa voltou para a posição original.',
+        'info',
+        1800,
+      );
+      return;
+    }
+
+    if (interactionState === 'move-select') {
+      cancelActiveMove(true);
+      showTransientAlert('Modo Empilhar', 'Voltou para empilhamento de novas caixas.', 'info', 1400);
+      return;
+    }
+
+    if (activeModule.boxes.length === 0) {
+      showTransientAlert(
+        'Sem Caixas no Container',
+        'Empilhe ao menos uma caixa (ou clique em Simular Carga) antes de usar Mover Topo.',
+        'info',
+        2400,
+      );
+      return;
+    }
+
+    activeModule.clearHover();
+    interactionState = 'move-select';
+    syncMoveTopUI();
+    showTransientAlert(
+      'Modo Mover Topo',
+      'Aponte para uma caixa do topo (contorno branco) e toque/clique para pegar e mudar de lugar.',
+      'info',
+      3200,
+    );
+  };
+
   const hud = new HudController({
     onModeChange: (mode) => {
       if (mode === activeMode) return;
-      getActiveModule().clearHover();
+      cancelActiveMove(true);
       activeMode = mode;
       hud.setActiveMode(mode);
       syncReticleFootprint();
@@ -150,7 +312,7 @@ async function bootstrap(): Promise<void> {
           mode === 'pallet' ? 'Módulo 01 · Cubagem em Palete' : 'Módulo 02 · Picking em Caçamba',
           mode === 'pallet'
             ? 'Mova o mouse sobre o palete e clique para empilhar.'
-            : 'Mova o mouse nas zonas Z1–Z6 da caçamba para testar bloqueios de empilhamento.',
+            : 'Mova o mouse nas zonas Z1–Z6 da caçamba para testar bloqueios ou use Mover Topo.',
           'info',
           3000,
         );
@@ -160,17 +322,36 @@ async function bootstrap(): Promise<void> {
     },
 
     onRotateBox: () => {
+      if (interactionState === 'move-carrying' && movingWorkingBox) {
+        movingWorkingBox = rotateBox90(movingWorkingBox);
+        syncBoxCard();
+        showTransientAlert('Caixa Rotacionada 90°', 'Largura e profundidade invertidas.', 'info', 1100);
+        return;
+      }
       nextBox = rotateBox90(nextBox);
-      syncNextBox();
+      syncBoxCard();
       showTransientAlert('Caixa Rotacionada 90°', 'Largura e profundidade invertidas.', 'info', 1100);
     },
 
     onNextBox: () => {
+      if (interactionState !== 'place') return;
       nextBox = generateRandomBoxWithDifferentCategory(nextBox.category);
-      syncNextBox();
+      syncBoxCard();
+    },
+
+    onToggleMoveTop: () => {
+      toggleMoveTopMode();
     },
 
     onUndo: () => {
+      if (interactionState === 'move-carrying') {
+        cancelActiveMove(true);
+        showTransientAlert('Movimento Cancelado', 'A caixa retornou à posição original.', 'info', 1500);
+        return;
+      }
+      if (interactionState === 'move-select') {
+        cancelActiveMove(true);
+      }
       const removed = getActiveModule().undoLastBox();
       syncMetrics();
       if (removed) {
@@ -179,17 +360,19 @@ async function bootstrap(): Promise<void> {
     },
 
     onClear: () => {
+      cancelActiveMove(true);
       getActiveModule().clearBoxes();
       syncMetrics();
       showTransientAlert('Container Limpo', 'Todas as caixas foram removidas.', 'info', 1400);
     },
 
     onSeedTruck: () => {
+      cancelActiveMove(true);
       truckBedModule.seedDemoCargo();
       syncMetrics();
       showTransientAlert(
         'Carga Simulada na Caçamba',
-        'Caixas aleatórias posicionadas em Z1–Z4. Aponte sobre elas para testar bloqueios!',
+        'Caixas aleatórias posicionadas em Z1–Z4. Teste empilhar ou clique em Mover Topo!',
         'info',
         3000,
       );
@@ -197,6 +380,7 @@ async function bootstrap(): Promise<void> {
 
     onReanchor: () => {
       if (!xrSessionManager.isActive) return;
+      cancelActiveMove(true);
       const mod = getActiveModule();
       mod.resetAnchor();
       mod.root.visible = false;
@@ -217,6 +401,7 @@ async function bootstrap(): Promise<void> {
 
   const xrSessionManager = new XRSessionManager(sceneManager.renderer, hud.overlayRoot, {
     onSessionStart: () => {
+      cancelActiveMove(true);
       hud.setXRSessionActive(true);
       sceneManager.setDesktopControlsEnabled(false);
       previewGrid.visible = false;
@@ -239,6 +424,7 @@ async function bootstrap(): Promise<void> {
     },
 
     onSessionEnd: () => {
+      cancelActiveMove(true);
       hitTestController.reset();
       reticle.visible = false;
       previewGrid.visible = true;
@@ -287,14 +473,14 @@ async function bootstrap(): Promise<void> {
       reticle.visible = false;
       showTransientAlert(
         activeMode === 'pallet' ? 'Palete Ancorado!' : 'Caçamba Ancorada!',
-        'Aponte o celular para mover a caixa e toque na tela para empilhar.',
+        'Aponte o celular para mover a caixa e toque para empilhar (ou use Mover Topo).',
         'success',
         2600,
       );
       return;
     }
 
-    attemptPlacement();
+    handlePrimaryAction();
   });
 
   // Interação do Modo Simulador Desktop
@@ -331,7 +517,7 @@ async function bootstrap(): Promise<void> {
     if (event.button !== 0) return;
     const moved = Math.hypot(event.clientX - pointerDownX, event.clientY - pointerDownY);
     if (moved < 6) {
-      attemptPlacement();
+      handlePrimaryAction();
     }
   });
 
@@ -339,14 +525,26 @@ async function bootstrap(): Promise<void> {
     if (event.repeat) return;
     const key = event.key.toLowerCase();
     if (key === 'r') {
-      nextBox = rotateBox90(nextBox);
-      syncNextBox();
-    } else if (key === 'n') {
+      if (interactionState === 'move-carrying' && movingWorkingBox) {
+        movingWorkingBox = rotateBox90(movingWorkingBox);
+      } else {
+        nextBox = rotateBox90(nextBox);
+      }
+      syncBoxCard();
+    } else if (key === 'n' && interactionState === 'place') {
       nextBox = generateRandomBoxWithDifferentCategory(nextBox.category);
-      syncNextBox();
+      syncBoxCard();
+    } else if (key === 'm') {
+      toggleMoveTopMode();
+    } else if (key === 'escape' && interactionState !== 'place') {
+      cancelActiveMove(true);
     } else if (key === 'z') {
-      getActiveModule().undoLastBox();
-      syncMetrics();
+      if (interactionState === 'move-carrying') {
+        cancelActiveMove(true);
+      } else {
+        getActiveModule().undoLastBox();
+        syncMetrics();
+      }
     } else if (key === '1') {
       document.getElementById('btn-mode-pallet')?.click();
     } else if (key === '2') {
@@ -357,7 +555,8 @@ async function bootstrap(): Promise<void> {
   setDesktopLayout();
   syncReticleFootprint();
   hud.setActiveMode(activeMode);
-  syncNextBox();
+  syncMoveTopUI();
+  syncBoxCard();
   syncMetrics();
 
   const arSupported = await isImmersiveARSupported();
@@ -373,7 +572,7 @@ async function bootstrap(): Promise<void> {
   } else if (!arSupported) {
     showTransientAlert(
       'Modo Simulador 3D Ativo',
-      'Mova o mouse sobre o palete/caçamba e clique para empilhar. Arraste para girar.',
+      'Mova o mouse para empilhar ou clique em Mover Topo para reposicionar caixas do topo.',
       'info',
       4500,
     );
@@ -404,25 +603,83 @@ async function bootstrap(): Promise<void> {
         return;
       }
 
-      lastHover = activeModule.updateHover(raycaster, nextBox, timeSec, dt);
-
-      const crosshairStatus = !lastHover.active
-        ? 'idle'
-        : lastHover.validation?.valid
-          ? 'valid'
-          : 'invalid';
-      hud.setCrosshairState(true, crosshairStatus);
-      updateLiveHoverAlert(lastHover);
+      runAimUpdate(activeModule, timeSec, dt, true);
       return;
     }
 
     // 2. Fluxo Simulador 3D Desktop
     if (pointerInsideCanvas && activeModule.isAnchored) {
       raycaster.setFromCamera(pointerNdc, sceneManager.camera);
-      lastHover = activeModule.updateHover(raycaster, nextBox, timeSec, dt);
-      updateLiveHoverAlert(lastHover);
+      runAimUpdate(activeModule, timeSec, dt, false);
     }
   });
+
+  function runAimUpdate(
+    activeModule: InteractiveContainerModule,
+    timeSec: number,
+    dt: number,
+    isXR: boolean,
+  ): void {
+    if (interactionState === 'move-select') {
+      lastTopSelection = activeModule.inspectTopBoxSelection(raycaster, timeSec);
+      if (isXR) {
+        const status = !lastTopSelection.hoveredBox
+          ? 'idle'
+          : lastTopSelection.selectable
+            ? 'valid'
+            : 'invalid';
+        hud.setCrosshairState(true, status);
+      }
+      updateTopSelectionAlert(lastTopSelection);
+      return;
+    }
+
+    const boxToPlace =
+      interactionState === 'move-carrying' && movingWorkingBox ? movingWorkingBox : nextBox;
+
+    lastHover = activeModule.updateHover(raycaster, boxToPlace, timeSec, dt);
+
+    if (isXR) {
+      const status = !lastHover.active
+        ? 'idle'
+        : lastHover.validation?.valid
+          ? 'valid'
+          : 'invalid';
+      hud.setCrosshairState(true, status);
+    }
+
+    updateLiveHoverAlert(lastHover);
+  }
+
+  function updateTopSelectionAlert(selection: TopBoxSelectionInspection): void {
+    if (performance.now() < transientAlertUntil) {
+      return;
+    }
+
+    if (!selection.hoveredBox) {
+      hud.showAlert(
+        'Modo Mover Topo',
+        'Aponte para uma caixa do topo (destacadas em branco) e toque/clique para pegar.',
+        'info',
+      );
+      return;
+    }
+
+    const colorLabel = CATEGORY_CONFIG[selection.hoveredBox.category].shortLabel;
+    if (selection.selectable) {
+      hud.showAlert(
+        `✓ Caixa ${colorLabel} (Topo)`,
+        'Toque/clique para pegar esta caixa e mudar de lugar.',
+        'success',
+      );
+    } else {
+      hud.showAlert(
+        `✕ Caixa ${colorLabel} Bloqueada`,
+        'Existe outra caixa empilhada em cima. Mova primeiro a caixa do topo.',
+        'error',
+      );
+    }
+  }
 
   function updateLiveHoverAlert(hover: HoverInspection): void {
     if (performance.now() < transientAlertUntil) {
@@ -435,13 +692,24 @@ async function bootstrap(): Promise<void> {
     }
 
     if (!hover.validation.valid) {
+      const actionPrefix = interactionState === 'move-carrying' ? 'MOVIMENTO BLOQUEADO' : 'BLOQUEADO';
       const title = hover.zoneLabel
-        ? `✕ BLOQUEADO · Zona ${hover.zoneLabel}`
-        : '✕ NÃO É POSSÍVEL EMPILHAR';
+        ? `✕ ${actionPrefix} · Zona ${hover.zoneLabel}`
+        : `✕ ${actionPrefix}`;
       hud.showAlert(
         title,
         hover.diagnosticMessage ?? 'Empilhamento inválido nesta posição.',
         'error',
+      );
+      return;
+    }
+
+    if (interactionState === 'move-carrying') {
+      const zoneSuffix = hover.zoneLabel ? ` em ${hover.zoneLabel}` : '';
+      hud.showAlert(
+        `✓ Nova Posição Válida${zoneSuffix}`,
+        'Toque/clique para soltar a caixa aqui.',
+        'success',
       );
       return;
     }

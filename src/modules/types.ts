@@ -19,6 +19,12 @@ export interface HoverInspection {
   readonly diagnosticMessage?: string;
 }
 
+export interface TopBoxSelectionInspection {
+  readonly hoveredBox: PlacedBox | null;
+  /** `true` se a caixa sob a mira é uma caixa do topo (sem nada empilhado em cima). */
+  readonly selectable: boolean;
+}
+
 export interface InteractiveContainerModule {
   readonly root: THREE.Group;
   readonly bounds: ContainerBounds;
@@ -35,6 +41,16 @@ export interface InteractiveContainerModule {
   ): HoverInspection;
   clearHover(): void;
   tryPlaceCurrentHover(): PlacementValidation | null;
+
+  /** Modo "Mover Topo": destaca caixas do topo e verifica qual caixa está sob a mira. */
+  inspectTopBoxSelection(raycaster: THREE.Raycaster, timeSec: number): TopBoxSelectionInspection;
+  /** Remove da cena e retorna a caixa do topo atualmente sob a mira para ser movida. */
+  pickHoveredTopBox(): PlacedBox | null;
+  /** Restaura uma caixa retirada (ex.: ao cancelar a movimentação). */
+  restoreBox(box: PlacedBox): void;
+  /** Limpa os destaques visuais do modo de seleção de topo. */
+  clearSelectionVisuals(): void;
+
   undoLastBox(): PlacedBox | null;
   clearBoxes(): void;
   getMetrics(): CubingMetrics;

@@ -13,6 +13,8 @@ import {
   describeDetailedValidation,
   evaluateTruckZones,
   findZoneAt,
+  getTopBoxIds,
+  isTopBox,
   validatePlacement,
 } from '../../src/domain/stacking-rules';
 import type { BoxCategory, PlacedBox } from '../../src/domain/types';
@@ -179,5 +181,20 @@ describe('stacking-rules — zonas da caçamba (Módulo B) e diagnósticos', () 
     );
     expect(message).toContain('Vermelha');
     expect(message).toContain('Azul');
+  });
+
+  it('identifica corretamente apenas as caixas do topo livres para seleção e movimentação', () => {
+    const redBase = makeBox('r1', redDims, { x: 0, y: 0.15, z: 0 });
+    const greenMid = makeBox('g1', { width: 0.3, height: 0.3, depth: 0.3 }, { x: 0, y: 0.45, z: 0 });
+    const blueTop = makeBox('b1', blueDims, { x: 0, y: 0.7, z: 0 });
+    const freeBlue = makeBox('b2', blueDims, { x: 0.35, y: 0.1, z: 0 });
+
+    const all = [redBase, greenMid, blueTop, freeBlue];
+
+    expect(isTopBox(redBase, all)).toBe(false);
+    expect(isTopBox(greenMid, all)).toBe(false);
+    expect(isTopBox(blueTop, all)).toBe(true);
+    expect(isTopBox(freeBlue, all)).toBe(true);
+    expect(getTopBoxIds(all)).toEqual(['b1', 'b2']);
   });
 });

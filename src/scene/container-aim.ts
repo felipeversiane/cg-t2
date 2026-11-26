@@ -89,3 +89,33 @@ export function createLandingFootprint(): THREE.LineSegments {
   lines.visible = false;
   return lines;
 }
+
+/**
+ * Identifica o ID da caixa posicionada diretamente sob o raio da câmera/mouse,
+ * testando apenas os corpos sólidos (`THREE.Mesh`) e ignorando wireframes (`LineSegments`).
+ */
+export function findAimedBoxId(
+  raycaster: THREE.Raycaster,
+  boxMeshes: ReadonlyMap<string, THREE.Group>,
+): string | null {
+  const bodies: THREE.Object3D[] = [];
+  for (const group of boxMeshes.values()) {
+    for (const child of group.children) {
+      if (child instanceof THREE.Mesh) {
+        bodies.push(child);
+      }
+    }
+  }
+
+  if (bodies.length === 0) {
+    return null;
+  }
+
+  const hits = raycaster.intersectObjects(bodies, false);
+  const firstHit = hits[0];
+  if (!firstHit) {
+    return null;
+  }
+
+  return (firstHit.object.userData.boxId as string | undefined) ?? null;
+}

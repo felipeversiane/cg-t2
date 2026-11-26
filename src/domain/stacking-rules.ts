@@ -182,6 +182,41 @@ export function computeRestingCenterY(
   return highestSurfaceY + height / 2;
 }
 
+/**
+ * Verifica se `box` é uma "caixa do topo", ou seja, se NÃO existe nenhuma outra caixa
+ * apoiada diretamente sobre sua face superior. Apenas caixas do topo podem ser selecionadas
+ * e movidas sem derrubar a pilha.
+ */
+export function isTopBox(
+  box: PlacedBox,
+  placedBoxes: readonly PlacedBox[],
+  epsilon = GEOMETRY_EPSILON,
+): boolean {
+  const boxBounds = getBoxBounds(box);
+
+  for (const other of placedBoxes) {
+    if (other.id === box.id) {
+      continue;
+    }
+
+    const otherBounds = getBoxBounds(other);
+    const restsOnTopPlane = Math.abs(otherBounds.minY - boxBounds.maxY) <= epsilon * 2;
+    if (restsOnTopPlane && horizontalOverlapArea(boxBounds, otherBounds) > epsilon * epsilon) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/** Retorna os IDs de todas as caixas que estão no topo (livres para serem selecionadas/movidas). */
+export function getTopBoxIds(
+  placedBoxes: readonly PlacedBox[],
+  epsilon = GEOMETRY_EPSILON,
+): readonly string[] {
+  return placedBoxes.filter((box) => isTopBox(box, placedBoxes, epsilon)).map((box) => box.id);
+}
+
 export function calculateCubingMetrics(
   placedBoxes: readonly PlacedBox[],
   container: ContainerBounds,
