@@ -19,8 +19,10 @@ import {
   setBoxConflictHighlight,
   updateGhostAppearance,
 } from '../../scene/box-mesh';
-import { createLandingFootprint, resolveContainerAim } from '../../scene/container-aim';
+import { createLandingFootprint, resolveContainerAim, smoothAxis } from '../../scene/container-aim';
 import type { HoverInspection, InteractiveContainerModule } from '../types';
+
+const AIM_HOLD_GRACE_SEC = 0.25;
 
 /**
  * Módulo A — Cubagem Virtual (Simulação de Carga em Palete).
@@ -33,7 +35,6 @@ export class PalletModule implements InteractiveContainerModule {
 
   private readonly boxesGroup: THREE.Group;
   private readonly boxMeshes = new Map<string, THREE.Group>();
-  private readonly boxBodyMeshes: THREE.Mesh[] = [];
   private readonly ceilingAlertMesh: THREE.Mesh;
   private readonly landingFootprint: THREE.LineSegments;
 
@@ -47,6 +48,7 @@ export class PalletModule implements InteractiveContainerModule {
   private smoothedX = 0;
   private smoothedZ = 0;
   private smoothedY = 0;
+  private lastValidAimTimeSec = -1;
 
   private currentCandidate: PlacedBox | null = null;
   private currentValidation: PlacementValidation | null = null;
@@ -116,21 +118,41 @@ export class PalletModule implements InteractiveContainerModule {
       return { active: false, candidate: null, validation: null };
     }
 
-    const aim = resolveContainerAim(raycaster, this.root, this.boxBodyMeshes, this.bounds);
+    const aim = resolveContainerAim(raycaster, this.root, this.bounds);
     if (!aim) {
+      // Mantém brevemente a última posição estável se houver micro-oscilação de tracking no celular
+      if (this.hasSmoothedAim && timeSec - this.lastValidAimTimeSec <= AIM_HOLD_GRACE_SEC) {
+        if (this.currentCandidate && this.currentValidation) {
+          if (this.ghostMesh) {
+            updateGhostAppearance(this.ghostMesh, !this.currentValidation.valid, timeSec);
+          }
+          this.applyConflictHighlights(this.currentValidation, timeSec);
+          return {
+            active: true,
+            candidate: this.currentCandidate,
+            validation: this.currentValidation,
+            diagnosticMessage: describeDetailedValidation(
+              this.currentCandidate,
+              this.currentValidation,
+              this.placedBoxes,
+              this.bounds,
+            ),
+          };
+        }
+      }
       this.clearHover();
       return { active: false, candidate: null, validation: null };
     }
 
-    // Suavização exponencial para eliminar trepidação da mão no celular mantendo resposta imediata
-    const alpha = 1 - Math.exp(-20 * Math.max(0.001, dt));
+    this.lastValidAimTimeSec = timeSec;
+
     if (!this.hasSmoothedAim) {
       this.smoothedX = aim.localX;
       this.smoothedZ = aim.localZ;
       this.hasSmoothedAim = true;
     } else {
-      this.smoothedX += (aim.localX - this.smoothedX) * alpha;
-      this.smoothedZ += (aim.localZ - this.smoothedZ) * alpha;
+      this.smoothedX = smoothAxis(this.smoothedX, aim.localX, dt);
+      this.smoothedZ = smoothAxis(this.smoothedZ, aim.localZ, dt);
     }
 
     const logicalX = Number(this.smoothedX.toFixed(3));
@@ -146,7 +168,7 @@ export class PalletModule implements InteractiveContainerModule {
     );
 
     if (this.ghostMesh?.visible) {
-      this.smoothedY += (targetCenterY - this.smoothedY) * alpha;
+      this.smoothedY = smoothAxis(this.smoothedY, targetCenterY, dt, 22, 3.2);
     } else {
       this.smoothedY = targetCenterY;
     }
@@ -221,7 +243,6 @@ export class PalletModule implements InteractiveContainerModule {
     mesh.position.set(placed.position.x, placed.position.y, placed.position.z);
     this.boxesGroup.add(mesh);
     this.boxMeshes.set(placed.id, mesh);
-    this.rebuildBodyMeshList();
 
     const result = this.currentValidation;
     this.currentCandidate = null;
@@ -240,7 +261,6 @@ export class PalletModule implements InteractiveContainerModule {
       this.boxesGroup.remove(mesh);
       disposeObject3D(mesh);
       this.boxMeshes.delete(removed.id);
-      this.rebuildBodyMeshList();
     }
 
     this.clearHover();
@@ -253,24 +273,12 @@ export class PalletModule implements InteractiveContainerModule {
       disposeObject3D(mesh);
     }
     this.boxMeshes.clear();
-    this.boxBodyMeshes.length = 0;
     this.placedBoxes = [];
     this.clearHover();
   }
 
   public getMetrics(): CubingMetrics {
     return calculateCubingMetrics(this.placedBoxes, this.bounds);
-  }
-
-  private rebuildBodyMeshList(): void {
-    this.boxBodyMeshes.length = 0;
-    for (const group of this.boxMeshes.values()) {
-      for (const child of group.children) {
-        if (child instanceof THREE.Mesh) {
-          this.boxBodyMeshes.push(child);
-        }
-      }
-    }
   }
 
   private ensureGhostMesh(spec: BoxSpec): void {

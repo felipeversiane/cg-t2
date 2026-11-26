@@ -25,9 +25,11 @@ import {
   setBoxConflictHighlight,
   updateGhostAppearance,
 } from '../../scene/box-mesh';
-import { createLandingFootprint, resolveContainerAim } from '../../scene/container-aim';
+import { createLandingFootprint, resolveContainerAim, smoothAxis } from '../../scene/container-aim';
 import { createZoneLabelTexture } from '../../scene/label-sprite';
 import type { HoverInspection, InteractiveContainerModule } from '../types';
+
+const AIM_HOLD_GRACE_SEC = 0.25;
 
 interface ZoneVisual {
   readonly zone: TruckZone;
@@ -48,7 +50,6 @@ export class TruckBedModule implements InteractiveContainerModule {
 
   private readonly boxesGroup: THREE.Group;
   private readonly boxMeshes = new Map<string, THREE.Group>();
-  private readonly boxBodyMeshes: THREE.Mesh[] = [];
   private readonly zoneVisuals = new Map<string, ZoneVisual>();
 
   private readonly wallMaterials: THREE.MeshStandardMaterial[] = [];
@@ -65,6 +66,7 @@ export class TruckBedModule implements InteractiveContainerModule {
   private smoothedX = 0;
   private smoothedZ = 0;
   private smoothedY = 0;
+  private lastValidAimTimeSec = -1;
 
   private currentCandidate: PlacedBox | null = null;
   private currentValidation: PlacementValidation | null = null;
@@ -194,21 +196,46 @@ export class TruckBedModule implements InteractiveContainerModule {
       return { active: false, candidate: null, validation: null };
     }
 
-    const aim = resolveContainerAim(raycaster, this.root, this.boxBodyMeshes, this.bounds);
+    const aim = resolveContainerAim(raycaster, this.root, this.bounds);
     if (!aim) {
+      if (this.hasSmoothedAim && timeSec - this.lastValidAimTimeSec <= AIM_HOLD_GRACE_SEC) {
+        if (this.currentCandidate && this.currentValidation) {
+          const heldZone = findZoneAt(
+            this.zones,
+            this.currentCandidate.position.x,
+            this.currentCandidate.position.z,
+          );
+          if (this.ghostMesh) {
+            updateGhostAppearance(this.ghostMesh, !this.currentValidation.valid, timeSec);
+          }
+          return {
+            active: true,
+            candidate: this.currentCandidate,
+            validation: this.currentValidation,
+            zoneLabel: heldZone?.label,
+            diagnosticMessage: describeDetailedValidation(
+              this.currentCandidate,
+              this.currentValidation,
+              this.placedBoxes,
+              this.bounds,
+            ),
+          };
+        }
+      }
       this.clearHover();
       return { active: false, candidate: null, validation: null };
     }
 
-    // Movimento contínuo e suave seguindo exatamente onde o celular aponta (sem teleporte brusco!)
-    const alpha = 1 - Math.exp(-20 * Math.max(0.001, dt));
+    this.lastValidAimTimeSec = timeSec;
+
+    // Movimento contínuo e suave seguindo exatamente onde o celular aponta (sem saltos!)
     if (!this.hasSmoothedAim) {
       this.smoothedX = aim.localX;
       this.smoothedZ = aim.localZ;
       this.hasSmoothedAim = true;
     } else {
-      this.smoothedX += (aim.localX - this.smoothedX) * alpha;
-      this.smoothedZ += (aim.localZ - this.smoothedZ) * alpha;
+      this.smoothedX = smoothAxis(this.smoothedX, aim.localX, dt);
+      this.smoothedZ = smoothAxis(this.smoothedZ, aim.localZ, dt);
     }
 
     const logicalX = Number(this.smoothedX.toFixed(3));
@@ -225,7 +252,7 @@ export class TruckBedModule implements InteractiveContainerModule {
     );
 
     if (this.ghostMesh?.visible) {
-      this.smoothedY += (targetCenterY - this.smoothedY) * alpha;
+      this.smoothedY = smoothAxis(this.smoothedY, targetCenterY, dt, 22, 3.2);
     } else {
       this.smoothedY = targetCenterY;
     }
@@ -351,7 +378,6 @@ export class TruckBedModule implements InteractiveContainerModule {
       this.boxesGroup.remove(mesh);
       disposeObject3D(mesh);
       this.boxMeshes.delete(removed.id);
-      this.rebuildBodyMeshList();
     }
 
     this.clearHover();
@@ -364,7 +390,6 @@ export class TruckBedModule implements InteractiveContainerModule {
       disposeObject3D(mesh);
     }
     this.boxMeshes.clear();
-    this.boxBodyMeshes.length = 0;
     this.placedBoxes = [];
     this.clearHover();
   }
@@ -379,18 +404,6 @@ export class TruckBedModule implements InteractiveContainerModule {
     mesh.position.set(placed.position.x, placed.position.y, placed.position.z);
     this.boxesGroup.add(mesh);
     this.boxMeshes.set(placed.id, mesh);
-    this.rebuildBodyMeshList();
-  }
-
-  private rebuildBodyMeshList(): void {
-    this.boxBodyMeshes.length = 0;
-    for (const group of this.boxMeshes.values()) {
-      for (const child of group.children) {
-        if (child instanceof THREE.Mesh) {
-          this.boxBodyMeshes.push(child);
-        }
-      }
-    }
   }
 
   private ensureGhostMesh(spec: BoxSpec): void {
